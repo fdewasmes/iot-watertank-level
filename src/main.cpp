@@ -1,28 +1,84 @@
-#include <Adafruit_Sensor.h>
+#include <Arduino.h>
+#include <Wire.h>
 #include <SigFox.h>
+#include "RTCZero.h"
 #include <ArduinoLowPower.h>
-#include "conversions.h"
+
 
 // defines pins numbers
-const int trigPin = 0;
-const int echoPin = 1;
+const int greenPin = 2;
+const int redPin = 3;
+volatile int alarm_source = 0;
 
-#define DEBUG 1
+#define DEBUG 0
 #define SLEEPTIME  15  * 1000
 
-uint16_t take_measurement(){
-  // Clears the trigPin
-  digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
-  // Sets the trigPin on HIGH state for 10 micro seconds
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
-  // Reads the echoPin, returns the sound wave travel time in microseconds
-  long duration = pulseIn(echoPin, HIGH);
-  // Calculating the distance
-  uint16_t distance= duration*0.034/2;
+#define header_H    0x55 //Header
+#define header_L    0xAA //Header
+#define device_Addr 0x11 //Address
+#define data_Length 0x00 //Data length
+#define get_Dis_CMD 0x02 //Command: Read Distance
+#define checksum    0x12 //Checksum
 
+unsigned char CMD[6]={
+  header_H,header_L,device_Addr,data_Length,get_Dis_CMD,checksum}; //Distance command package
+
+void redOn(){
+  digitalWrite(redPin, HIGH);
+  digitalWrite(greenPin, LOW);
+  delay(500);
+  digitalWrite(redPin, LOW);
+}
+
+void blink(int times, int pin){
+  digitalWrite(redPin, LOW);
+  digitalWrite(greenPin, LOW);
+  int i;
+
+  for (i = 0; i < times; i++){
+    digitalWrite(pin, HIGH);
+    delay(100);
+    digitalWrite(pin, LOW);
+    delay(100);
+  }
+}
+
+void flashBatteryVoltage(const float batteryVoltage){
+  int integral = (int)batteryVoltage;
+  float decimal = batteryVoltage - integral;
+  int trimmed_ecimal = (int)(decimal*10);
+  blink(integral, redPin);
+  delay(500);
+  blink(trimmed_ecimal, greenPin);
+}
+
+void alarmEvent0() {
+  alarm_source = 0;
+}
+
+float readBatteryVoltage() {
+    analogReadResolution(10);
+    analogReference(AR_INTERNAL1V0); //AR_DEFAULT: the default analog reference of 3.3V // AR_INTERNAL1V0: a built-in 1.0V reference
+    // read the input on analog pin 0:
+    int sensorValue = analogRead(ADC_BATTERY);
+    // Convert the analog reading (which goes from 0 - 1023) to a voltage (0 - 4.3V):
+    float voltage = sensorValue * (3.25 / 1023.0);
+    return voltage;
+}
+
+unsigned int readDistance(){
+  unsigned int distance=0;
+  int i = 0;
+  unsigned char rx_data[8];
+  for(i=0;i<6;i++){
+    Serial1.write(CMD[i]);
+  }
+  delay(1000);  //Wait for the result
+  i=0;
+  while (Serial1.available()){  //Read the return data (Note: this demo is only for the reference, no data verification)
+    rx_data[i++]=(Serial1.read());
+  }
+  distance=((rx_data[5]<<8)|rx_data[6]); //Read the distance value
   return distance;
 }
 
@@ -53,31 +109,15 @@ void send_distance(uint16_t distance, uint16_t voltage) {
   SigFox.end();
 }
 
-void alarmEvent0() {
-  if (DEBUG) {
-    Serial.print("alarm");
-  }
-}
-
-uint16_t readVoltage(){
-  analogReadResolution(10);
-  analogReference(AR_INTERNAL1V0); //AR_DEFAULT: the default analog reference of 3.3V // AR_INTERNAL1V0: a built-in 1.0V reference
-
-  // read the input on analog pin 0:
-  int sensorValue = analogRead(ADC_BATTERY);
-  // Convert the analog reading (which goes from 0 - 1023) to a voltage (0 - 4.3V):
-  uint16_t voltage = (uint16_t)(sensorValue * (3.25 / 1023.0)*1000); //millivolt
-  // print out the value you read:
-  if (DEBUG) {
-    Serial.print(voltage);
-    Serial.println("mV");
-  }
-  return voltage;
-}
 
 void setup() {
-  pinMode(trigPin, OUTPUT); // Sets the trigPin as an Output
-  pinMode(echoPin, INPUT); // Sets the echoPin as an Input 
+  Serial1.begin(19200);  //Serial1: Ultrasonic Sensor Communication Serial Port, Buadrate: 19200
+  pinMode(greenPin, OUTPUT); // Sets the trigPin as an Output
+  pinMode(redPin, OUTPUT); // Sets the echoPin as an Input
+  pinMode(4, OUTPUT); // Sets the echoPin as an Input
+  digitalWrite(4, LOW);
+  digitalWrite(greenPin, LOW);
+  digitalWrite(redPin, LOW);
 
   LowPower.attachInterruptWakeup(RTC_ALARM_WAKEUP, alarmEvent0, CHANGE);
 
@@ -100,23 +140,18 @@ void setup() {
   SigFox.end();
 }
 
-void loop()
-{
-  pinMode(trigPin, OUTPUT); // Sets the trigPin as an Output
-  pinMode(echoPin, INPUT); // Sets the echoPin as an Input
-
-  uint16_t distance = take_measurement();
-
+void loop() {
+  float batteryVoltage = readBatteryVoltage();
+  flashBatteryVoltage(batteryVoltage);
+  int distance = readDistance();
   if (DEBUG){
     // Prints the distance on the Serial Monitor
     Serial.print("Distance: ");
     Serial.println(distance);
+    Serial.print("Voltage: ");
+    Serial.println(batteryVoltage);
   }
+  send_distance(distance, batteryVoltage*1000);
 
-  float voltage = readVoltage();
-
-  // send once every 24 hours
-  send_distance(distance, voltage);
-
-  LowPower.sleep(SLEEPTIME);
+  LowPower.deepSleep(SLEEPTIME);
 }
